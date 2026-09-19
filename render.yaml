@@ -1,0 +1,43 @@
+# Split deploy: API + Socket.IO on Render, SPA on Vercel.
+# After Vercel deploy, set CORS_ORIGIN to the Vercel URL in the Render dashboard.
+
+services:
+  - type: web
+    name: middocs-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "4000"
+      - key: INSTANCE_ID
+        value: render-1
+      - key: DATABASE_URL
+        fromDatabase:
+          name: middocs-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: middocs-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        sync: false
+
+  - type: redis
+    name: middocs-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
+
+databases:
+  - name: middocs-db
+    plan: free
+    databaseName: mini_google_docs
+    user: mgd
