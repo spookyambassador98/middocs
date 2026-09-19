@@ -30,7 +30,7 @@ export default function LoginPage() {
       <div className="auth-card">
         <div className="auth-brand">
           <div className="logo-mark" />
-          <span>Draft</span>
+          <span>middocs</span>
         </div>
         <h1>С возвращением</h1>
         <p className="subtitle">Войдите, чтобы продолжить работу над документами.</p>

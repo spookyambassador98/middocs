@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api, type ApiDocument } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { Avatar } from "../components/Avatar";
+import { ShareLiveProjectButton } from "../components/ShareLiveProjectButton";
 import { DocumentCard } from "./DocumentCard";
 
 export default function DashboardPage() {
@@ -63,9 +64,10 @@ export default function DashboardPage() {
       <header className="topbar">
         <div className="topbar-brand">
           <div className="logo-mark" />
-          Draft
+          middocs
         </div>
         <div className="topbar-user">
+          <ShareLiveProjectButton />
           {user && <Avatar name={user.name} color={user.color} size={34} />}
           <button className="btn btn-ghost" onClick={logout}>
             Выйти

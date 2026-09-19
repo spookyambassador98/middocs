@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { api } from "../api/client";
 import { Avatar } from "../components/Avatar";
+import { ShareLiveProjectButton } from "../components/ShareLiveProjectButton";
 import { Editor } from "./Editor";
 import { PresenceStack, TypingStrip } from "./PresenceBar";
 import { SocketIOProvider, type ConnectionStatus } from "./SocketIOProvider";
@@ -116,6 +117,7 @@ export default function EditorPage() {
           placeholder="Без названия"
         />
         <div className="editor-topbar-spacer" />
+        <ShareLiveProjectButton url={window.location.href} className="btn btn-ghost share-live-btn" />
         <PresenceStack peers={peers} />
         <span className={`connection-pill ${status}`}>
           <span className="connection-dot" />

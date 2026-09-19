@@ -250,6 +250,18 @@ a { color: var(--accent); }
   gap: 12px;
 }
 
+.share-live-btn {
+  width: auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .share-live-btn {
+    padding-inline: 12px;
+    font-size: 0.85rem;
+  }
+}
+
 .avatar {
   display: inline-flex;
   align-items: center;

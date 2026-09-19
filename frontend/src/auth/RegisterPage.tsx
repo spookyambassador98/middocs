@@ -31,7 +31,7 @@ export default function RegisterPage() {
       <div className="auth-card">
         <div className="auth-brand">
           <div className="logo-mark" />
-          <span>Draft</span>
+          <span>middocs</span>
         </div>
         <h1>Создать аккаунт</h1>
         <p className="subtitle">Совместные документы в реальном времени — бесплатно и без ограничений.</p>
