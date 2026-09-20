@@ -10,11 +10,37 @@ export interface ApiUser {
 export interface ApiDocument {
   id: string;
   title: string;
+  icon: string;
   ownerId: string;
   ownerName: string;
   isOwner: boolean;
   updatedAt: string;
   createdAt: string;
+  encrypted: boolean;
+  forkedFromDocumentId: string | null;
+}
+
+export interface ApiSnapshot {
+  id: string;
+  createdAt: string;
+}
+
+export interface ApiTimelapseOp {
+  id: string;
+  createdAt: string;
+}
+
+export interface ApiBranch {
+  id: string;
+  title: string;
+  icon: string;
+  createdAt: string;
+}
+
+export interface ApiStateParts {
+  encrypted: boolean;
+  baseline: string | null;
+  pending: string[];
 }
 
 class ApiError extends Error {
@@ -65,10 +91,12 @@ export const api = {
 
   listDocuments: () => request<{ documents: ApiDocument[] }>("/api/documents"),
 
-  createDocument: (title?: string) =>
+  getDocument: (id: string) => request<{ document: ApiDocument }>(`/api/documents/${id}`),
+
+  createDocument: (title?: string, icon?: string, options?: { encrypted?: boolean; initialState?: string }) =>
     request<{ document: ApiDocument }>("/api/documents", {
       method: "POST",
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ title, icon, ...options }),
     }),
 
   renameDocument: (id: string, title: string) =>
@@ -77,8 +105,31 @@ export const api = {
       body: JSON.stringify({ title }),
     }),
 
-  deleteDocument: (id: string) =>
-    request<{ ok: true }>(`/api/documents/${id}`, { method: "DELETE" }),
+  setDocumentIcon: (id: string, icon: string) =>
+    request<{ ok: true }>(`/api/documents/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ icon }),
+    }),
+
+  deleteDocument: (id: string) => request<{ ok: true }>(`/api/documents/${id}`, { method: "DELETE" }),
+
+  listHistory: (id: string) => request<{ snapshots: ApiSnapshot[] }>(`/api/documents/${id}/history`),
+
+  getHistorySnapshot: (id: string, snapshotId: string) =>
+    request<{ state: string }>(`/api/documents/${id}/history/${snapshotId}`),
+
+  restoreHistorySnapshot: (id: string, snapshotId: string) =>
+    request<{ ok: true }>(`/api/documents/${id}/history/${snapshotId}/restore`, { method: "POST" }),
+
+  listTimelapse: (id: string) => request<{ ops: ApiTimelapseOp[] }>(`/api/documents/${id}/timelapse`),
+
+  getTimelapseUpdates: (id: string) => request<{ updates: string[] }>(`/api/documents/${id}/timelapse/updates`),
+
+  getState: (id: string) => request<ApiStateParts>(`/api/documents/${id}/state`),
+
+  listBranches: (id: string) => request<{ branches: ApiBranch[] }>(`/api/documents/${id}/branches`),
+
+  createBranch: (id: string) => request<{ document: ApiDocument }>(`/api/documents/${id}/branch`, { method: "POST" }),
 };
 
 export { ApiError };

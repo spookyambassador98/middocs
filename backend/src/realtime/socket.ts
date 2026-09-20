@@ -9,13 +9,16 @@ import { verifyToken } from "../auth/utils.js";
 import { getDocumentMeta, recordAccess } from "../documents/service.js";
 import { createBus } from "./bus.js";
 import { createRoomManager, roomName } from "./roomManager.js";
+import { setRoomManager } from "./bridge.js";
 import type { AuthUser } from "../types.js";
 
 declare module "socket.io" {
-  interface SocketData {
-    user: AuthUser;
-    docId?: string;
-    awarenessClientId?: number;
+  interface Socket {
+    data: {
+      user: AuthUser;
+      docId?: string;
+      awarenessClientId?: number;
+    };
   }
 }
 
@@ -48,6 +51,7 @@ export async function attachRealtime(httpServer: HttpServer) {
   });
 
   const roomManager = createRoomManager(io, bus.publish);
+  setRoomManager(roomManager);
 
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token as string | undefined;
@@ -82,12 +86,32 @@ export async function attachRealtime(httpServer: HttpServer) {
         const room = await roomManager.acquire(docId);
         recordAccess(user.id, docId).catch((err) => console.error("[access] failed to record", err));
 
-        const stateUpdate = Y.encodeStateAsUpdate(room.doc);
         const awarenessStates = Array.from(room.awareness.getStates().keys());
         const awarenessUpdate = awarenessProtocol.encodeAwarenessUpdate(room.awareness, awarenessStates);
 
+        if (room.encrypted) {
+          // The server never decodes an encrypted room's content, so it
+          // can't hand back one merged state the way it does below —
+          // instead: the last client-pushed checkpoint (may be null only
+          // in the narrow window right after creation) plus every
+          // encrypted update since, in order. The client decrypts each and
+          // applies them in turn to reconstruct current content locally.
+          ack?.({
+            ok: true,
+            encrypted: true,
+            title: meta.title,
+            ownerId: meta.ownerId,
+            state: room.latestCipherState ? Buffer.from(room.latestCipherState) : null,
+            pendingUpdates: room.pendingCipherUpdates.map((u) => Buffer.from(u)),
+            awareness: Buffer.from(awarenessUpdate),
+          });
+          return;
+        }
+
+        const stateUpdate = Y.encodeStateAsUpdate(room.doc);
         ack?.({
           ok: true,
+          encrypted: false,
           title: meta.title,
           ownerId: meta.ownerId,
           state: Buffer.from(stateUpdate),
@@ -100,15 +124,50 @@ export async function attachRealtime(httpServer: HttpServer) {
     });
 
     socket.on("sync-update", ({ docId, update }: { docId: string; update: ArrayBuffer | Uint8Array }) => {
-      const room = roomManager.rooms.get(docId);
-      if (!room || socket.data.docId !== docId) return;
-      Y.applyUpdate(room.doc, toUint8Array(update), `local:${socket.id}`);
+      if (socket.data.docId !== docId) return;
+      roomManager.applyClientUpdate(docId, socket.id, toUint8Array(update));
+    });
+
+    // Encrypted documents only: the client's own locally-merged full
+    // state, re-encrypted, replacing the accumulated pending-update log
+    // with one compact baseline. See roomManager's module comment.
+    socket.on("checkpoint", ({ docId, state }: { docId: string; state: ArrayBuffer | Uint8Array }) => {
+      if (socket.data.docId !== docId) return;
+      void roomManager.applyCheckpoint(docId, socket.id, toUint8Array(state));
     });
 
     socket.on("awareness-update", ({ docId, update }: { docId: string; update: ArrayBuffer | Uint8Array }) => {
       const room = roomManager.rooms.get(docId);
       if (!room || socket.data.docId !== docId) return;
       awarenessProtocol.applyAwarenessUpdate(room.awareness, toUint8Array(update), `local:${socket.id}`);
+    });
+
+    // Ephemeral, fire-and-forget: not part of the Yjs document at all, so
+    // no persistence and no application-level Redis bus needed. The
+    // Socket.io Redis adapter alone already makes io.to(room).emit(...)
+    // reach clients on every backend instance, which is all this needs.
+    socket.on("reaction", ({ docId, emoji }: { docId: string; emoji: string }) => {
+      if (socket.data.docId !== docId) return;
+      if (typeof emoji !== "string" || emoji.length === 0 || emoji.length > 8) return;
+      io.to(roomName(docId)).emit("reaction", {
+        emoji,
+        clientId: socket.data.awarenessClientId,
+      });
+    });
+
+    // Also ephemeral, same reasoning as "reaction" above: powers the live
+    // per-character attribution heatmap (Editor.tsx / AttributionOverlay),
+    // not part of the CRDT document itself, so a peer who was offline for
+    // the moment it fired simply never sees that highlight — acceptable
+    // for a purely visual, self-fading affordance.
+    socket.on("attribution", ({ docId, index, length }: { docId: string; index: number; length: number }) => {
+      if (socket.data.docId !== docId) return;
+      if (typeof index !== "number" || typeof length !== "number" || length <= 0 || length > 20_000) return;
+      io.to(roomName(docId)).emit("attribution", {
+        index,
+        length,
+        clientId: socket.data.awarenessClientId,
+      });
     });
 
     socket.on("leave-document", () => {

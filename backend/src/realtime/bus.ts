@@ -12,7 +12,7 @@ import { config } from "../config.js";
 
 export const CHANNEL = "yjs-bus";
 
-type BusMessageType = "sync" | "awareness";
+type BusMessageType = "sync" | "awareness" | "checkpoint";
 
 interface BusMessage {
   instanceId: string;

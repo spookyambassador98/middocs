@@ -24,10 +24,10 @@ export function TypingStrip({ peers }: { peers: PeerState[] }) {
 
   const label =
     typingNames.length === 1
-      ? `${typingNames[0]} печатает`
+      ? `${typingNames[0]} is typing`
       : typingNames.length === 2
-      ? `${typingNames[0]} и ${typingNames[1]} печатают`
-      : `${typingNames.length} человек печатают`;
+      ? `${typingNames[0]} and ${typingNames[1]} are typing`
+      : `${typingNames.length} people are typing`;
 
   return (
     <div className="typing-strip">

@@ -19,7 +19,7 @@ export default function LoginPage() {
       await login(email, password);
       navigate("/");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Не удалось войти. Попробуйте ещё раз.");
+      setError(err instanceof ApiError ? err.message : "Could not sign in. Try again.");
     } finally {
       setSubmitting(false);
     }
@@ -32,8 +32,8 @@ export default function LoginPage() {
           <div className="logo-mark" />
           <span>middocs</span>
         </div>
-        <h1>С возвращением</h1>
-        <p className="subtitle">Войдите, чтобы продолжить работу над документами.</p>
+        <h1>Welcome back</h1>
+        <p className="subtitle">Sign in to keep writing with your team.</p>
 
         {error && <div className="form-error">{error}</div>}
 
@@ -51,7 +51,7 @@ export default function LoginPage() {
             />
           </div>
           <div className="field">
-            <label htmlFor="password">Пароль</label>
+            <label htmlFor="password">Password</label>
             <input
               id="password"
               type="password"
@@ -63,12 +63,12 @@ export default function LoginPage() {
             />
           </div>
           <button className="btn btn-primary" type="submit" disabled={submitting}>
-            {submitting ? "Входим…" : "Войти"}
+            {submitting ? "Signing in…" : "Sign in"}
           </button>
         </form>
 
         <div className="auth-switch">
-          Ещё нет аккаунта? <Link to="/register">Зарегистрироваться</Link>
+          No account yet? <Link to="/register">Create one</Link>
         </div>
       </div>
     </div>

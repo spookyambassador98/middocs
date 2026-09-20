@@ -15,9 +15,12 @@ export interface JwtPayload {
 export interface DocumentSummary {
   id: string;
   title: string;
+  icon: string;
   ownerId: string;
   ownerName: string;
   isOwner: boolean;
   updatedAt: string;
   createdAt: string;
+  encrypted: boolean;
+  forkedFromDocumentId: string | null;
 }

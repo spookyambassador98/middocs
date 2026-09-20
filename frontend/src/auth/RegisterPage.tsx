@@ -20,7 +20,7 @@ export default function RegisterPage() {
       await register(email, password, name);
       navigate("/");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Не удалось зарегистрироваться. Попробуйте ещё раз.");
+      setError(err instanceof ApiError ? err.message : "Could not create the account. Try again.");
     } finally {
       setSubmitting(false);
     }
@@ -33,14 +33,14 @@ export default function RegisterPage() {
           <div className="logo-mark" />
           <span>middocs</span>
         </div>
-        <h1>Создать аккаунт</h1>
-        <p className="subtitle">Совместные документы в реальном времени — бесплатно и без ограничений.</p>
+        <h1>Create an account</h1>
+        <p className="subtitle">Realtime collaborative documents — free, no seat limits.</p>
 
         {error && <div className="form-error">{error}</div>}
 
         <form onSubmit={handleSubmit}>
           <div className="field">
-            <label htmlFor="name">Имя</label>
+            <label htmlFor="name">Name</label>
             <input
               id="name"
               type="text"
@@ -48,7 +48,7 @@ export default function RegisterPage() {
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Как вас называть в документе"
+              placeholder="How you appear in the document"
             />
           </div>
           <div className="field">
@@ -64,7 +64,7 @@ export default function RegisterPage() {
             />
           </div>
           <div className="field">
-            <label htmlFor="password">Пароль</label>
+            <label htmlFor="password">Password</label>
             <input
               id="password"
               type="password"
@@ -73,16 +73,16 @@ export default function RegisterPage() {
               minLength={6}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Минимум 6 символов"
+              placeholder="At least 6 characters"
             />
           </div>
           <button className="btn btn-primary" type="submit" disabled={submitting}>
-            {submitting ? "Создаём аккаунт…" : "Зарегистрироваться"}
+            {submitting ? "Creating account…" : "Create account"}
           </button>
         </form>
 
         <div className="auth-switch">
-          Уже есть аккаунт? <Link to="/login">Войти</Link>
+          Already have an account? <Link to="/login">Sign in</Link>
         </div>
       </div>
     </div>
