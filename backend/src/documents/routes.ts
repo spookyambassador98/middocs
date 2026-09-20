@@ -225,7 +225,7 @@ documentsRouter.get(
     res.json({
       encrypted: meta.encrypted,
       baseline: parts.baseline ? Buffer.from(parts.baseline).toString("base64") : null,
-      pending: parts.pending.map((u) => Buffer.from(u).toString("base64")),
+      pending: parts.pending.map((u: Uint8Array) => Buffer.from(u).toString("base64")),
     });
   })
 );

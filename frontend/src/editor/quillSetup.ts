@@ -17,5 +17,5 @@ export function registerQuillExtensions() {
     static blotName = "divider";
     static tagName = "HR";
   }
-  Quill.register(DividerBlot);
+  Quill.register(DividerBlot as never);
 }

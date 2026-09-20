@@ -21,7 +21,7 @@ export async function generateDocumentKey(): Promise<CryptoKey> {
 
 export async function importDocumentKey(rawUrlSafeBase64: string): Promise<CryptoKey> {
   const raw = base64UrlToBytes(rawUrlSafeBase64);
-  return crypto.subtle.importKey("raw", raw, "AES-GCM", true, ["encrypt", "decrypt"]);
+  return crypto.subtle.importKey("raw", toArrayBuffer(raw), "AES-GCM", true, ["encrypt", "decrypt"]);
 }
 
 export async function exportDocumentKey(key: CryptoKey): Promise<string> {
@@ -47,10 +47,9 @@ export async function decryptBytes(key: CryptoKey, combined: Uint8Array): Promis
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  // Guarantees a real standalone ArrayBuffer (not a view into a larger
-  // pooled buffer with extra bytes on either side), which is what
-  // SubtleCrypto expects.
-  return bytes.slice().buffer;
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 // ---------- base64 helpers ----------

@@ -13,12 +13,10 @@ import { setRoomManager } from "./bridge.js";
 import type { AuthUser } from "../types.js";
 
 declare module "socket.io" {
-  interface Socket {
-    data: {
-      user: AuthUser;
-      docId?: string;
-      awarenessClientId?: number;
-    };
+  interface SocketData {
+    user: AuthUser;
+    docId?: string;
+    awarenessClientId?: number;
   }
 }
 
