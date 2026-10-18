@@ -121,3 +121,43 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS encrypted BOOLEAN NOT NULL DEFAUL
 -- server never needs to decode them to do that, so this works identically
 -- for encrypted and plaintext documents.
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS forked_from_document_id UUID REFERENCES documents(id) ON DELETE SET NULL;
+
+-- ---------- Notary: tamper-evident, hash-chained version history ----------
+-- Each snapshot's chain_hash = sha256(prev_chain_hash + documentId +
+-- createdAt + authorSummary + state_hash), exactly like a git commit hash
+-- or a blockchain block hash chains to the one before it. Anyone holding
+-- just this metadata (never the actual document bytes) can recompute the
+-- whole chain and confirm no row was ever silently edited, reordered, or
+-- deleted-and-reinserted — from that point on every subsequent hash would
+-- stop matching. state_hash is sha256 of the snapshot's own state bytes
+-- (ciphertext for an encrypted document — the server hashes opaque bytes
+-- either way, never needing to understand them), so the chain metadata
+-- can be handed to a browser without ever transferring the — potentially
+-- large — actual document states. See service.ts's insertSnapshot and
+-- frontend/src/editor/notary.ts for both ends of this.
+ALTER TABLE document_snapshots ADD COLUMN IF NOT EXISTS prev_chain_hash TEXT;
+ALTER TABLE document_snapshots ADD COLUMN IF NOT EXISTS chain_hash TEXT;
+ALTER TABLE document_snapshots ADD COLUMN IF NOT EXISTS state_hash TEXT;
+ALTER TABLE document_snapshots ADD COLUMN IF NOT EXISTS author_summary TEXT;
+
+-- Per-update authorship, best-effort: whichever connected client's socket
+-- actually sent this specific network update (see roomManager's
+-- socketPresence map). Used for (a) the notary chain's per-checkpoint
+-- "author_summary" and (b) the personal "Flow" activity dashboard —
+-- deliberately just an id/name + timestamp, never the content of the
+-- update itself, so activity analytics work identically for encrypted and
+-- plaintext documents without ever touching what was actually typed.
+ALTER TABLE document_updates ADD COLUMN IF NOT EXISTS author_id UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE document_updates ADD COLUMN IF NOT EXISTS author_name TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_document_updates_author ON document_updates(author_id, created_at);
+
+-- ---------- Public "watch live" spectator links ----------
+-- An opaque, unguessable token that grants read-only, no-login viewing of
+-- a document's live edits over a completely separate socket path
+-- (join-spectate — see socket.ts) that can never emit a mutating event.
+-- Null when spectating isn't enabled. Deliberately unavailable for
+-- encrypted documents (a spectator without the key couldn't decode
+-- anything anyway, so offering the toggle would just be confusing) — see
+-- routes.ts's check on document creation of a spectator link.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS spectator_token TEXT UNIQUE;

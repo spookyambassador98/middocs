@@ -5,6 +5,7 @@ import { hashPassword, verifyPassword, signToken } from "./utils.js";
 import { pickColorFor } from "./colors.js";
 import { requireAuth } from "./middleware.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { getUserActivity } from "../documents/service.js";
 
 export const authRouter = Router();
 
@@ -84,3 +85,17 @@ authRouter.post("/login", asyncHandler(async (req, res) => {
 authRouter.get("/me", requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
+
+// Personal "Flow" activity analytics — see service.ts's getUserActivity
+// for why this only ever touches timestamps/counts, never document
+// content, so it works the same regardless of which of the user's
+// documents (encrypted or not) the activity came from.
+authRouter.get(
+  "/activity",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const days = Math.min(365, Math.max(7, Number(req.query.days) || 180));
+    const activity = await getUserActivity(req.user!.id, days);
+    res.json(activity);
+  })
+);

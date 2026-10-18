@@ -12,8 +12,10 @@ import { importDocumentKey } from "./crypto";
 import { cacheDocumentKey, getCachedDocumentKey } from "./keyStore";
 import { Editor, type EditorApi } from "./Editor";
 import { HistoryDrawer } from "./HistoryDrawer";
+import { NotaryDrawer } from "./NotaryDrawer";
 import { PresenceStack, TypingStrip } from "./PresenceBar";
 import { SocketIOProvider, type ConnectionStatus } from "./SocketIOProvider";
+import { SpectatorLinkModal } from "./SpectatorLinkModal";
 import { TimelapseDrawer } from "./TimelapseDrawer";
 import { useAwarenessStates } from "./useAwarenessStates";
 
@@ -56,6 +58,9 @@ export default function EditorPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [timelapseOpen, setTimelapseOpen] = useState(false);
   const [branchModalOpen, setBranchModalOpen] = useState(false);
+  const [notaryOpen, setNotaryOpen] = useState(false);
+  const [spectatorModalOpen, setSpectatorModalOpen] = useState(false);
+  const [meshPeerCount, setMeshPeerCount] = useState(0);
   const [reactionMenuOpen, setReactionMenuOpen] = useState(false);
   const [visitDiff, setVisitDiff] = useState<VisitDiff | null>(null);
   const palette = useCommandPalette();
@@ -111,7 +116,7 @@ export default function EditorPage() {
       setKeyStr(manualKeyInput.trim());
       setKeyResolution("resolved");
     } catch {
-      setManualKeyError("Could not read the key — make sure it was copied in full");
+      setManualKeyError("Could not read that key. Check that the whole key was copied.");
     }
   }
 
@@ -129,6 +134,7 @@ export default function EditorPage() {
     setFatalError(null);
     setEditorApi(null);
     setVisitDiff(null);
+    setMeshPeerCount(0);
 
     const p = new SocketIOProvider(id, token, { name: user.name, color: user.color }, encryptionKey);
     setProvider(p);
@@ -142,6 +148,7 @@ export default function EditorPage() {
 
     const offStatus = p.onStatusChange(setStatus);
     const offError = p.onError(setFatalError);
+    const offMeshPeerCount = p.onMeshPeerCountChange(setMeshPeerCount);
     const offReady = p.onReady(({ title: initialTitle }) => {
       // First client to ever connect seeds the shared title from
       // Postgres; afterwards the Yjs map is the live source of truth for
@@ -159,6 +166,7 @@ export default function EditorPage() {
     return () => {
       offStatus();
       offError();
+      offMeshPeerCount();
       offReady();
       metaMap.unobserve(onMetaChange);
       saveVisitSnapshot(id, p.doc);
@@ -219,6 +227,7 @@ export default function EditorPage() {
       { id: "history", label: "Version history", icon: "🕐", run: () => setHistoryOpen(true) },
       { id: "timelapse", label: "Writing timelapse", icon: "🎬", run: () => setTimelapseOpen(true) },
       { id: "branches", label: "Branches and merge", icon: "🌿", run: () => setBranchModalOpen(true) },
+      { id: "notary", label: "Notary: check the history chain", icon: "🔏", run: () => setNotaryOpen(true) },
       {
         id: "comments",
         label: showComments ? "Hide comments" : "Show comments",
@@ -234,6 +243,14 @@ export default function EditorPage() {
         },
       },
     ];
+    if (docMeta?.isOwner && !docMeta?.encrypted) {
+      cmds.push({
+        id: "spectate",
+        label: "Broadcast live (public link)",
+        icon: "📡",
+        run: () => setSpectatorModalOpen(true),
+      });
+    }
     if (editorApi) {
       cmds.push(
         { id: "undo", label: "Undo", hint: "Ctrl+Z", icon: "↶", run: () => editorApi.undo() },
@@ -252,7 +269,7 @@ export default function EditorPage() {
       }
     }
     return cmds;
-  }, [navigate, showComments, editorApi, provider, insertDivider, sendReaction]);
+  }, [navigate, showComments, editorApi, provider, insertDivider, sendReaction, docMeta]);
 
   if (!id) return null;
 
@@ -276,8 +293,7 @@ export default function EditorPage() {
           <div style={{ fontSize: "2rem", marginBottom: 8 }}>🔒</div>
           <h3 style={{ margin: "0 0 8px" }}>This document is encrypted</h3>
           <p style={{ color: "var(--text-muted)", marginBottom: 16 }}>
-            This browser does not have the access key. Open the document from the full link (the part after
-            “#key=”) or paste the key here.
+            This browser does not have the access key. Open the full link (the part after #key=) or paste the key.
           </p>
           <input
             className="editor-title-input"
@@ -304,11 +320,11 @@ export default function EditorPage() {
   return (
     <div className="editor-shell">
       <div className="editor-topbar">
-        <button className="icon-btn" onClick={() => navigate("/")} title="Back to documents">
+        <button className="icon-btn" onClick={() => navigate("/")} title="Documents">
           ←
         </button>
         {provider?.encrypted && (
-          <span className="lock-pill" title="Zero-knowledge: the server never sees the contents">
+          <span className="lock-pill" title="Zero-knowledge: the server cannot read this">
             🔒
           </span>
         )}
@@ -340,6 +356,14 @@ export default function EditorPage() {
         <button className="icon-btn" title="Branches and merge" onClick={() => setBranchModalOpen(true)}>
           🌿
         </button>
+        <button className="icon-btn" title="Notary: check the history chain" onClick={() => setNotaryOpen(true)}>
+          🔏
+        </button>
+        {docMeta?.isOwner && !docMeta?.encrypted && (
+          <button className="icon-btn" title="Broadcast live" onClick={() => setSpectatorModalOpen(true)}>
+            📡
+          </button>
+        )}
         <button
           className={`icon-btn ${showComments ? "active" : ""}`}
           title="Comments"
@@ -366,6 +390,11 @@ export default function EditorPage() {
         </button>
 
         <PresenceStack peers={peers} />
+        {meshPeerCount > 0 && (
+          <span className="p2p-badge" title="Direct peer connections (WebRTC, alongside the server)">
+            🔗 {meshPeerCount}
+          </span>
+        )}
         <span className={`connection-pill ${status}`}>
           <span className="connection-dot" />
           {STATUS_LABEL[status]}
@@ -381,7 +410,7 @@ export default function EditorPage() {
         {!ready || !provider ? (
           <div className="editor-loading">
             <div className="spinner" />
-            Loading document…
+            Loading the document…
           </div>
         ) : (
           <div className="editor-body">
@@ -398,12 +427,7 @@ export default function EditorPage() {
       </div>
 
       {historyOpen && (
-        <HistoryDrawer
-          docId={id}
-          encryptionKey={encryptionKey}
-          onClose={() => setHistoryOpen(false)}
-          onRestored={() => setHistoryOpen(false)}
-        />
+        <HistoryDrawer docId={id} onClose={() => setHistoryOpen(false)} onRestored={() => setHistoryOpen(false)} />
       )}
 
       {timelapseOpen && (
@@ -423,6 +447,19 @@ export default function EditorPage() {
           provider={provider}
           onClose={() => setBranchModalOpen(false)}
           onForked={handleForked}
+        />
+      )}
+
+      {notaryOpen && <NotaryDrawer docId={id} onClose={() => setNotaryOpen(false)} />}
+
+      {spectatorModalOpen && (
+        <SpectatorLinkModal
+          docId={id}
+          initialToken={docMeta?.spectatorToken ?? null}
+          onClose={() => setSpectatorModalOpen(false)}
+          onTokenChange={(nextToken) =>
+            setDocMeta((m) => (m ? { ...m, spectatorToken: nextToken } : m))
+          }
         />
       )}
 

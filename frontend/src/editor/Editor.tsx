@@ -260,6 +260,8 @@ export function Editor({
       provider.awareness.setLocalStateField("typing", false);
       undoManager.destroy();
       binding.destroy();
+      const toolbarEl = containerRef.current?.previousElementSibling;
+      if (toolbarEl?.classList.contains("ql-toolbar")) toolbarEl.remove();
       quillRef.current = null;
     };
     // provider is stable for the lifetime of this component (created once by the parent).

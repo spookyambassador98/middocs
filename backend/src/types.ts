@@ -23,4 +23,5 @@ export interface DocumentSummary {
   createdAt: string;
   encrypted: boolean;
   forkedFromDocumentId: string | null;
+  spectatorToken: string | null;
 }

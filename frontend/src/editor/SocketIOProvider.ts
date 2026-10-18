@@ -25,6 +25,7 @@ import * as awarenessProtocol from "y-protocols/awareness.js";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { API_URL } from "../api/client";
 import { decryptBytes, encryptBytes } from "./crypto";
+import { WebRtcMesh, isWebRtcMeshSupported, type WireSignal } from "./webrtcMesh";
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
@@ -76,9 +77,15 @@ export class SocketIOProvider {
   private errorListeners = new Set<Listener<string>>();
   private reactionListeners = new Set<Listener<ReactionEvent>>();
   private attributionListeners = new Set<Listener<AttributionEvent>>();
+  private meshPeerCountListeners = new Set<Listener<number>>();
   private hasSynced = false;
   private opsSinceCheckpoint = 0;
   private checkpointTimer: ReturnType<typeof setInterval> | null = null;
+  // Supplementary peer-to-peer resilience — see webrtcMesh.ts. Null when
+  // the browser doesn't support WebRTC at all; every use below is
+  // optional-chained, so the provider degrades to server-only sync (its
+  // original behavior) with no special-casing needed elsewhere.
+  private mesh: WebRtcMesh | null = null;
 
   constructor(
     docId: string,
@@ -123,7 +130,7 @@ export class SocketIOProvider {
       this.errorListeners.forEach((l) => l(err.message));
     });
     this.socket.on("sync-update", ({ update }: { update: ArrayBuffer }) => {
-      void this.handleIncomingUpdate(new Uint8Array(update));
+      void this.applyIncomingWireBytes(new Uint8Array(update), "remote");
     });
     this.socket.on("awareness-update", ({ update }: { update: ArrayBuffer }) => {
       awarenessProtocol.applyAwarenessUpdate(this.awareness, new Uint8Array(update), "remote");
@@ -134,6 +141,62 @@ export class SocketIOProvider {
     this.socket.on("attribution", (event: AttributionEvent) => {
       this.attributionListeners.forEach((l) => l(event));
     });
+
+    // ---------- P2P mesh (supplementary to, never a replacement for, the server) ----------
+    if (isWebRtcMeshSupported()) {
+      this.mesh = new WebRtcMesh(
+        this.awareness.clientID,
+        (toClientId, signal) => this.socket.emit("webrtc-signal", { docId: this.docId, toClientId, signal }),
+        (bytes) => void this.applyIncomingWireBytes(bytes, "webrtc-peer"),
+        (remoteClientId) => this.sendMeshHandshake(remoteClientId)
+      );
+      const mesh = this.mesh;
+      mesh.onPeerCountChange((count) => this.meshPeerCountListeners.forEach((l) => l(count)));
+
+      this.socket.on("webrtc-signal", ({ fromClientId, signal }: { fromClientId: number; signal: WireSignal }) => {
+        void mesh.receiveSignal(fromClientId, signal);
+      });
+
+      // Every awareness change (ours or a peer's) is a cheap, always-fresh
+      // snapshot of "who else is actually in this document room right
+      // now" — reconciling the mesh against it on every change is more
+      // than we strictly need (awareness also updates on every cursor
+      // move), but reconcile() is a no-op for peers we're already
+      // connected to, so the extra calls cost only a couple of Set
+      // lookups.
+      this.awareness.on("update", this.handleMeshAwarenessChange);
+    }
+  }
+
+  private handleMeshAwarenessChange = () => {
+    if (!this.mesh) return;
+    const peerIds = Array.from(this.awareness.getStates().keys());
+    this.mesh.reconcile(peerIds);
+  };
+
+  /** The number of currently-open direct peer connections — surfaced in the editor topbar as a small "P2P" indicator. Always 0 if the browser doesn't support WebRTC. */
+  get meshPeerCount(): number {
+    return this.mesh?.openPeerCount() ?? 0;
+  }
+
+  onMeshPeerCountChange(listener: Listener<number>) {
+    this.meshPeerCountListeners.add(listener);
+    return () => this.meshPeerCountListeners.delete(listener);
+  }
+
+  /** Sent once, right when a direct connection to a peer opens: our full current state, so that peer is caught up even in the (normal) case where they connected to us before either side had synced everything through the server. Harmless to "over-send" — Yjs states are idempotent to re-apply. */
+  private sendMeshHandshake(remoteClientId: number): void {
+    if (!this.mesh) return;
+    const mesh = this.mesh;
+    void (async () => {
+      try {
+        const state = Y.encodeStateAsUpdate(this.doc);
+        const wireBytes = this.encryptionKey ? await encryptBytes(this.encryptionKey, state) : state;
+        mesh.sendTo(remoteClientId, wireBytes);
+      } catch (err) {
+        console.error("[SocketIOProvider] failed to send P2P handshake state", err);
+      }
+    })();
   }
 
   /** Broadcasts an ephemeral emoji reaction to everyone else in the document (not persisted, not part of the CRDT). */
@@ -169,7 +232,7 @@ export class SocketIOProvider {
 
   private async handleJoinAck(ack: JoinAck): Promise<void> {
     if (!ack.ok) {
-      this.errorListeners.forEach((l) => l(ack.error ?? "Could not join the document"));
+      this.errorListeners.forEach((l) => l(ack.error ?? "Could not connect to the document"));
       this.setStatus("disconnected");
       return;
     }
@@ -177,7 +240,7 @@ export class SocketIOProvider {
     try {
       if (ack.encrypted) {
         if (!this.encryptionKey) {
-          this.errorListeners.forEach((l) => l("This document needs an access key — open it from the full link"));
+          this.errorListeners.forEach((l) => l("This document needs its access key. Open the full link."));
           this.setStatus("disconnected");
           return;
         }
@@ -197,7 +260,7 @@ export class SocketIOProvider {
       }
     } catch (err) {
       console.error("[SocketIOProvider] failed to decrypt document state", err);
-      this.errorListeners.forEach((l) => l("Could not decrypt the document — the access key is wrong"));
+      this.errorListeners.forEach((l) => l("Could not decrypt the document. The access key is wrong."));
       this.setStatus("disconnected");
       return;
     }
@@ -217,26 +280,28 @@ export class SocketIOProvider {
     }
   }
 
-  private async handleIncomingUpdate(update: Uint8Array): Promise<void> {
+  /** Applies bytes that arrived over the wire — either the server's "sync-update" or a direct WebRTC data-channel message, tagged with `origin` so handleLocalDocUpdate below knows not to loop them straight back out. */
+  private async applyIncomingWireBytes(bytes: Uint8Array, origin: string): Promise<void> {
     if (this.encryptionKey) {
       try {
-        const plain = await decryptBytes(this.encryptionKey, update);
-        Y.applyUpdate(this.doc, plain, "remote");
+        const plain = await decryptBytes(this.encryptionKey, bytes);
+        Y.applyUpdate(this.doc, plain, origin);
       } catch (err) {
         console.error("[SocketIOProvider] failed to decrypt incoming update", err);
       }
       return;
     }
-    Y.applyUpdate(this.doc, update, "remote");
+    Y.applyUpdate(this.doc, bytes, origin);
   }
 
   private handleLocalDocUpdate = (update: Uint8Array, origin: unknown) => {
-    if (origin === "remote" || origin === "server-init") return;
+    if (origin === "remote" || origin === "server-init" || origin === "webrtc-peer") return;
     if (this.encryptionKey) {
       void this.sendEncryptedUpdate(update);
       return;
     }
     this.socket.emit("sync-update", { docId: this.docId, update });
+    this.mesh?.send(update);
   };
 
   private async sendEncryptedUpdate(update: Uint8Array): Promise<void> {
@@ -244,6 +309,7 @@ export class SocketIOProvider {
     try {
       const cipher = await encryptBytes(this.encryptionKey, update);
       this.socket.emit("sync-update", { docId: this.docId, update: cipher });
+      this.mesh?.send(cipher);
       this.opsSinceCheckpoint += 1;
       if (this.opsSinceCheckpoint >= CHECKPOINT_OP_THRESHOLD) {
         void this.pushCheckpoint();
@@ -308,6 +374,8 @@ export class SocketIOProvider {
 
     this.doc.off("update", this.handleLocalDocUpdate);
     this.awareness.off("update", this.handleLocalAwarenessUpdate);
+    this.awareness.off("update", this.handleMeshAwarenessChange);
+    this.mesh?.destroy();
     awarenessProtocol.removeAwarenessStates(this.awareness, [this.doc.clientID], "window-unload");
     this.socket.emit("leave-document");
     this.socket.off();
@@ -319,5 +387,6 @@ export class SocketIOProvider {
     this.errorListeners.clear();
     this.reactionListeners.clear();
     this.attributionListeners.clear();
+    this.meshPeerCountListeners.clear();
   }
 }

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { config } from "./config.js";
 import { authRouter } from "./auth/routes.js";
 import { documentsRouter } from "./documents/routes.js";
+import { spectateRouter } from "./documents/spectateRoutes.js";
 import { attachRealtime } from "./realtime/socket.js";
 
 async function main() {
@@ -17,6 +18,9 @@ async function main() {
 
   app.use("/api/auth", authRouter);
   app.use("/api/documents", documentsRouter);
+  // No requireAuth here on purpose — a public "watch live" link has to
+  // work for someone with no account at all. See spectateRoutes.ts.
+  app.use("/api/spectate", spectateRouter);
 
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     console.error("[http] unhandled error", err);

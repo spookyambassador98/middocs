@@ -18,6 +18,7 @@ export interface ApiDocument {
   createdAt: string;
   encrypted: boolean;
   forkedFromDocumentId: string | null;
+  spectatorToken: string | null;
 }
 
 export interface ApiSnapshot {
@@ -41,6 +42,37 @@ export interface ApiStateParts {
   encrypted: boolean;
   baseline: string | null;
   pending: string[];
+}
+
+export interface ApiNotaryEntry {
+  id: string;
+  createdAt: string;
+  prevChainHash: string | null;
+  chainHash: string | null;
+  stateHash: string | null;
+  authorSummary: string | null;
+}
+
+export interface ApiSpectateInfo {
+  documentId: string;
+  title: string;
+  icon: string;
+}
+
+export interface ApiActivityDay {
+  date: string;
+  ops: number;
+}
+
+export interface ApiActivitySession {
+  start: string;
+  end: string;
+  opCount: number;
+}
+
+export interface ApiActivity {
+  daily: ApiActivityDay[];
+  sessions: ApiActivitySession[];
 }
 
 class ApiError extends Error {
@@ -130,6 +162,21 @@ export const api = {
   listBranches: (id: string) => request<{ branches: ApiBranch[] }>(`/api/documents/${id}/branches`),
 
   createBranch: (id: string) => request<{ document: ApiDocument }>(`/api/documents/${id}/branch`, { method: "POST" }),
+
+  getNotaryChain: (id: string) => request<{ chain: ApiNotaryEntry[] }>(`/api/documents/${id}/notary`),
+
+  createSpectatorLink: (id: string) =>
+    request<{ token: string }>(`/api/documents/${id}/spectator-link`, { method: "POST" }),
+
+  revokeSpectatorLink: (id: string) =>
+    request<{ ok: true }>(`/api/documents/${id}/spectator-link`, { method: "DELETE" }),
+
+  // Public — no auth token required (a spectator has no account); works
+  // fine through the same `request` helper since it simply omits the
+  // Authorization header when there's nothing to attach.
+  getSpectateInfo: (token: string) => request<ApiSpectateInfo>(`/api/spectate/${token}`),
+
+  getActivity: (days = 180) => request<ApiActivity>(`/api/auth/activity?days=${days}`),
 };
 
 export { ApiError };

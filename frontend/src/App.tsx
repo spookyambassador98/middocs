@@ -5,6 +5,7 @@ import LoginPage from "./auth/LoginPage";
 import RegisterPage from "./auth/RegisterPage";
 import DashboardPage from "./dashboard/DashboardPage";
 import EditorPage from "./editor/EditorPage";
+import SpectatePage from "./editor/SpectatePage";
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -55,6 +56,8 @@ export default function App() {
           </RequireAuth>
         }
       />
+      {/* Public, no-login "watch live" link — deliberately outside RequireAuth. */}
+      <Route path="/watch/:token" element={<SpectatePage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

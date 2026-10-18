@@ -42,6 +42,21 @@ export interface Room {
   // each of these in order (or in any order — Yjs updates are
   // commutative — but "in order" mirrors how they were produced).
   pendingCipherUpdates: Uint8Array[];
+  // ---- Presence bookkeeping, shared by three otherwise-unrelated features ----
+  // Which authenticated user is behind a given socket in this room. Never
+  // touched by spectators (they're never registered here) — this is only
+  // ever real editors. Powers (a) per-update authorship in the timelapse
+  // log / personal Flow analytics, (b) the notary chain's per-checkpoint
+  // "author_summary", and (c) resolving a WebRTC signaling relay target by
+  // awareness clientID (see getSocketIdForClient below).
+  socketPresence: Map<string, { userId: string; userName: string; awarenessClientId: number }>;
+  clientIdToSocket: Map<number, string>;
+  // Display names that contributed at least one update since the last
+  // notary snapshot was taken — cleared right after each snapshot. Not a
+  // precise per-operation attribution ledger (that's document_updates'
+  // job); just enough to give a snapshot a human-readable "who wrote this"
+  // summary like "Иван, Мария".
+  recentAuthorNames: Set<string>;
 }
 
 const ROOM_EVICTION_GRACE_MS = 60_000;
@@ -86,6 +101,42 @@ export function createRoomManager(io: Server, publish: BusPublish) {
   // instances for the same docId ("split-brain" room).
   const pendingCreations = new Map<string, Promise<Room>>();
 
+  function buildAuthorSummary(room: Room): string | null {
+    if (room.recentAuthorNames.size === 0) return null;
+    return Array.from(room.recentAuthorNames).join(", ");
+  }
+
+  /**
+   * Called once a socket has joined a document's room as a real editor
+   * (never for a spectator — see socket.ts's join-spectate, which never
+   * calls this). Two otherwise-unrelated features share this bookkeeping:
+   * resolving "who typed this" for the notary chain / Flow analytics, and
+   * resolving "which socket does awareness clientID N belong to right
+   * now" so the WebRTC signaling relay (see socket.ts's "webrtc-signal")
+   * knows where to forward an offer/answer/ICE candidate.
+   */
+  function registerSocketPresence(docId: string, socketId: string, awarenessClientId: number, user: { id: string; name: string }): void {
+    const room = rooms.get(docId);
+    if (!room) return;
+    room.socketPresence.set(socketId, { userId: user.id, userName: user.name, awarenessClientId });
+    room.clientIdToSocket.set(awarenessClientId, socketId);
+  }
+
+  function unregisterSocketPresence(docId: string, socketId: string): void {
+    const room = rooms.get(docId);
+    if (!room) return;
+    const presence = room.socketPresence.get(socketId);
+    room.socketPresence.delete(socketId);
+    if (presence && room.clientIdToSocket.get(presence.awarenessClientId) === socketId) {
+      room.clientIdToSocket.delete(presence.awarenessClientId);
+    }
+  }
+
+  /** Where the WebRTC signaling relay should deliver a message addressed to a given peer's awareness clientID, if that peer is currently connected to this instance. */
+  function getSocketIdForClient(docId: string, clientId: number): string | undefined {
+    return rooms.get(docId)?.clientIdToSocket.get(clientId);
+  }
+
   async function flush(room: Room): Promise<void> {
     // Encrypted rooms are never marked dirty (there is nothing the server
     // itself can compact — see module comment), so this is naturally a
@@ -104,7 +155,8 @@ export function createRoomManager(io: Server, publish: BusPublish) {
     if (Date.now() - room.lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
       room.lastSnapshotAt = Date.now();
       try {
-        await insertSnapshot(room.docId, state);
+        await insertSnapshot(room.docId, state, buildAuthorSummary(room));
+        room.recentAuthorNames.clear();
       } catch (err) {
         console.error(`[room ${room.docId}] failed to write snapshot`, err);
       }
@@ -155,6 +207,9 @@ export function createRoomManager(io: Server, publish: BusPublish) {
       lastSnapshotAt,
       latestCipherState: null,
       pendingCipherUpdates: [],
+      socketPresence: new Map(),
+      clientIdToSocket: new Map(),
+      recentAuthorNames: new Set(),
     };
 
     if (encrypted) {
@@ -176,8 +231,22 @@ export function createRoomManager(io: Server, publish: BusPublish) {
         // funnels through here — ordinary edits, history restores, and
         // branch merges alike — so logging it here (once, on whichever
         // instance originated it) gives the timelapse player a complete,
-        // exactly-once operation log for free.
-        insertUpdateLog(docId, update).catch((err) =>
+        // exactly-once operation log for free. When we can resolve which
+        // connected socket originated it, attribute the op to that user —
+        // this is what feeds the notary chain's author summary and the
+        // personal Flow activity dashboard.
+        let authorId: string | undefined;
+        let authorName: string | undefined;
+        if (typeof origin === "string" && origin.startsWith("local:")) {
+          const senderSocketId = origin.slice("local:".length);
+          const presence = room.socketPresence.get(senderSocketId);
+          if (presence) {
+            authorId = presence.userId;
+            authorName = presence.userName;
+            room.recentAuthorNames.add(presence.userName);
+          }
+        }
+        insertUpdateLog(docId, update, authorId, authorName).catch((err) =>
           console.error(`[room ${docId}] failed to log update for timelapse`, err)
         );
         publish(docId, "sync", update);
@@ -250,7 +319,9 @@ export function createRoomManager(io: Server, publish: BusPublish) {
 
     if (room.encrypted) {
       room.pendingCipherUpdates.push(update);
-      insertUpdateLog(docId, update).catch((err) =>
+      const presence = room.socketPresence.get(senderSocketId);
+      if (presence) room.recentAuthorNames.add(presence.userName);
+      insertUpdateLog(docId, update, presence?.userId, presence?.userName).catch((err) =>
         console.error(`[room ${docId}] failed to log encrypted update for timelapse`, err)
       );
       appendPendingUpdate(docId, update).catch((err) =>
@@ -282,7 +353,8 @@ export function createRoomManager(io: Server, publish: BusPublish) {
       await clearPendingUpdates(docId);
       if (Date.now() - room.lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
         room.lastSnapshotAt = Date.now();
-        await insertSnapshot(docId, state);
+        await insertSnapshot(docId, state, buildAuthorSummary(room));
+        room.recentAuthorNames.clear();
       }
     } catch (err) {
       console.error(`[room ${docId}] failed to persist checkpoint`, err);
@@ -411,6 +483,9 @@ export function createRoomManager(io: Server, publish: BusPublish) {
     restoreFromSnapshot,
     mergeExternalState,
     getCurrentStateParts,
+    registerSocketPresence,
+    unregisterSocketPresence,
+    getSocketIdForClient,
     flushAll,
     rooms,
   };

@@ -7,6 +7,7 @@ import { Avatar } from "../components/Avatar";
 import { CommandPalette, useCommandPalette, type Command } from "../components/CommandPalette";
 import { bytesToBase64, encryptBytes, exportDocumentKey, generateDocumentKey } from "../editor/crypto";
 import { cacheDocumentKey } from "../editor/keyStore";
+import { FlowDashboard } from "./FlowDashboard";
 import { DocumentCard } from "./DocumentCard";
 
 export default function DashboardPage() {
@@ -15,6 +16,7 @@ export default function DashboardPage() {
   const [documents, setDocuments] = useState<ApiDocument[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [flowOpen, setFlowOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -109,6 +111,12 @@ export default function DashboardPage() {
         icon: "🔒",
         run: () => void createEncryptedDocument(),
       },
+      {
+        id: "flow-dashboard",
+        label: "Flow — my writing activity",
+        icon: "📊",
+        run: () => setFlowOpen(true),
+      },
     ];
     for (const doc of documents ?? []) {
       cmds.push({
@@ -118,7 +126,7 @@ export default function DashboardPage() {
         run: () => navigate(`/doc/${doc.id}`),
       });
     }
-    cmds.push({ id: "logout", label: "Sign out", icon: "↩", run: logout });
+    cmds.push({ id: "logout", label: "Log out", icon: "↩", run: logout });
     return cmds;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documents]);
@@ -128,15 +136,18 @@ export default function DashboardPage() {
       <header className="topbar">
         <div className="topbar-brand">
           <div className="logo-mark" />
-          middocs
+          Draft
         </div>
         <div className="topbar-user">
           <button className="btn btn-ghost" title="Command palette (Ctrl+K)" onClick={() => palette.setOpen(true)}>
             ⌘K
           </button>
+          <button className="icon-btn" title="Flow — my writing activity" onClick={() => setFlowOpen(true)}>
+            📊
+          </button>
           {user && <Avatar name={user.name} color={user.color} size={34} />}
           <button className="btn btn-ghost" onClick={logout}>
-            Sign out
+            Log out
           </button>
         </div>
       </header>
@@ -145,7 +156,7 @@ export default function DashboardPage() {
         <div className="dashboard-header">
           <div>
             <h1>My documents</h1>
-            <p>Open a doc with the team — edits show up live.</p>
+            <p>Open a document with someone else. Edits show up live.</p>
           </div>
         </div>
 
@@ -161,7 +172,7 @@ export default function DashboardPage() {
               Aa
             </div>
             <h3 style={{ marginBottom: 6 }}>Nothing here yet</h3>
-            <p style={{ marginBottom: 20 }}>Create the first document and invite people with the link.</p>
+            <p style={{ marginBottom: 20 }}>Create a first document and invite someone with the link.</p>
             <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
               <button className="btn btn-primary" style={{ width: "auto" }} onClick={createDocument} disabled={creating}>
                 + New document
@@ -206,6 +217,7 @@ export default function DashboardPage() {
       </main>
 
       <CommandPalette open={palette.open} onClose={() => palette.setOpen(false)} commands={paletteCommands} />
+      {flowOpen && <FlowDashboard onClose={() => setFlowOpen(false)} />}
     </div>
   );
 }

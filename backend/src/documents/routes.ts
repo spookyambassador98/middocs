@@ -17,6 +17,9 @@ import {
   getAllUpdateBytes,
   listBranches,
   appendPendingUpdate,
+  listNotaryChain,
+  generateSpectatorToken,
+  setSpectatorToken,
   DEFAULT_DOC_ICON,
 } from "./service.js";
 
@@ -225,7 +228,7 @@ documentsRouter.get(
     res.json({
       encrypted: meta.encrypted,
       baseline: parts.baseline ? Buffer.from(parts.baseline).toString("base64") : null,
-      pending: parts.pending.map((u: Uint8Array) => Buffer.from(u).toString("base64")),
+      pending: parts.pending.map((u) => Buffer.from(u).toString("base64")),
     });
   })
 );
@@ -286,3 +289,62 @@ documentsRouter.post(
 // path a keystroke takes. See BranchMergeModal.tsx. roomManager still
 // exposes mergeExternalState() for a server-driven merge without any
 // client connected, kept for API completeness, but nothing here calls it.
+
+// ---------- Notary: tamper-evident hash-chained history ----------
+
+documentsRouter.get(
+  "/:id/notary",
+  asyncHandler(async (req, res) => {
+    const meta = await getDocumentMeta(req.params.id);
+    if (!meta) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    const chain = await listNotaryChain(meta.id);
+    res.json({ chain });
+  })
+);
+
+// ---------- Public "watch live" spectator links ----------
+// Owner-only to create/revoke; the resulting token itself is what grants
+// (read-only, no-login) access — see spectateRoutes.ts for the public side
+// and socket.ts's "join-spectate" for the realtime half.
+
+documentsRouter.post(
+  "/:id/spectator-link",
+  asyncHandler(async (req, res) => {
+    const meta = await getDocumentMeta(req.params.id);
+    if (!meta) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    if (meta.ownerId !== req.user!.id) {
+      res.status(403).json({ error: "Only the owner can enable spectating" });
+      return;
+    }
+    if (meta.encrypted) {
+      res.status(400).json({ error: "Zero-knowledge documents can't be spectated — the server can't decode them for a viewer without the key either" });
+      return;
+    }
+    const token = generateSpectatorToken();
+    await setSpectatorToken(meta.id, token);
+    res.json({ token });
+  })
+);
+
+documentsRouter.delete(
+  "/:id/spectator-link",
+  asyncHandler(async (req, res) => {
+    const meta = await getDocumentMeta(req.params.id);
+    if (!meta) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    if (meta.ownerId !== req.user!.id) {
+      res.status(403).json({ error: "Only the owner can revoke spectating" });
+      return;
+    }
+    await setSpectatorToken(meta.id, null);
+    res.json({ ok: true });
+  })
+);
