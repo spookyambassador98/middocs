@@ -1,6 +1,8 @@
 node_modules
 dist
 .env
+.env.local
+frontend/.env.local
 *.log
 postgres-data
 redis-data

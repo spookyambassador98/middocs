@@ -1,43 +1,14 @@
-// A minimal, from-scratch Yjs provider built on Socket.io.
-//
-// y-websocket (the "official" Yjs network provider) assumes a raw
-// WebSocket. This app uses Socket.io instead (for its automatic
-// reconnection, room support, and — most importantly — the Redis adapter
-// that makes it horizontally scalable), so we speak the same underlying
-// Yjs sync/awareness protocols but tunnel them over Socket.io events
-// instead of a raw ws:// connection.
-//
-// Binary Yjs updates are sent as-is inside Socket.io event payloads
-// (Socket.io transparently supports ArrayBuffer/Uint8Array/Buffer within
-// an emitted object), so no extra base64/JSON encoding is needed.
-//
-// Zero-knowledge mode (when `encryptionKey` is supplied): every outgoing
-// Yjs update — and the periodic full-state "checkpoint" this provider
-// pushes to let the server compact its storage — is AES-GCM encrypted
-// here before it ever reaches `socket.emit`, and every incoming one is
-// decrypted here before `Y.applyUpdate` ever sees it. The server (see
-// roomManager.ts) never has the key and only ever handles these as opaque
-// bytes. See crypto.ts for the encryption primitives and exactly what
-// this covers.
-import { io, type Socket } from "socket.io-client";
+// Realtime used to ride Socket.io on a long-running host. That host no
+// longer answers, and a websocket client retries forever — the editor
+// looked stuck. This provider keeps the same surface (Y.Doc, awareness,
+// reactions) and syncs through the same-origin HTTP API instead.
 import * as Y from "yjs";
 import * as awarenessProtocol from "y-protocols/awareness.js";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { API_URL } from "../api/client";
-import { decryptBytes, encryptBytes } from "./crypto";
+import { base64ToBytes, bytesToBase64, decryptBytes, encryptBytes } from "./crypto";
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
-
-interface JoinAck {
-  ok: boolean;
-  error?: string;
-  encrypted?: boolean;
-  title?: string;
-  ownerId?: string;
-  state?: ArrayBuffer | null;
-  pendingUpdates?: ArrayBuffer[];
-  awareness?: ArrayBuffer;
-}
 
 export interface ReactionEvent {
   emoji: string;
@@ -52,13 +23,23 @@ export interface AttributionEvent {
 
 type Listener<T> = (value: T) => void;
 
-// A local edit burst gets compacted into a fresh encrypted checkpoint
-// after this many individual updates, or this much idle time, whichever
-// comes first — mirroring the plaintext room's own SNAPSHOT_INTERVAL_MS
-// idea, just triggered client-side since only the client can decode
-// enough to produce a compacted state for an encrypted document.
+interface SyncPayload {
+  title: string;
+  ownerId: string;
+  encrypted: boolean;
+  state: string;
+  pending: string[];
+  awareness: { clientId: string; update: string }[];
+  signals: { id: number; kind: string; emoji?: string; clientId?: string | number; index?: number; length?: number }[];
+}
+
 const CHECKPOINT_OP_THRESHOLD = 25;
 const CHECKPOINT_INTERVAL_MS = 45_000;
+const POLL_MS = 3000;
+
+function authHeaders(token: string): HeadersInit {
+  return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+}
 
 export class SocketIOProvider {
   public readonly doc: Y.Doc;
@@ -66,8 +47,8 @@ export class SocketIOProvider {
   public readonly encrypted: boolean;
   public status: ConnectionStatus = "connecting";
 
-  private socket: Socket;
   private docId: string;
+  private token: string;
   private localUser: { name: string; color: string };
   private encryptionKey: CryptoKey | undefined;
   private persistence: IndexeddbPersistence;
@@ -79,6 +60,13 @@ export class SocketIOProvider {
   private hasSynced = false;
   private opsSinceCheckpoint = 0;
   private checkpointTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private signalCursor = 0;
+  private destroyed = false;
+  private dirty = false;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private awarenessTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastState = "";
 
   constructor(
     docId: string,
@@ -87,58 +75,21 @@ export class SocketIOProvider {
     encryptionKey?: CryptoKey
   ) {
     this.docId = docId;
+    this.token = token;
     this.doc = new Y.Doc();
     this.awareness = new awarenessProtocol.Awareness(this.doc);
     this.localUser = localUser;
     this.encryptionKey = encryptionKey;
     this.encrypted = Boolean(encryptionKey);
-
-    // Offline-first durability: every local edit is mirrored into the
-    // browser's IndexedDB as it happens (already-decrypted plaintext, on
-    // the user's own device — no different from any local-first app
-    // caching its own user's data). If the connection drops, editing keeps
-    // working against the in-memory Y.Doc as normal — this is what makes a
-    // page reload or browser restart *while offline* not lose anything.
-    // Namespaced per document so switching documents doesn't mix state.
     this.persistence = new IndexeddbPersistence(`mgd-doc-${docId}`, this.doc);
-
-    this.socket = io(API_URL, {
-      auth: { token },
-      transports: ["websocket", "polling"],
-      // socket.io-client multiplexes/caches connections by URI by default,
-      // which would hand a brand-new provider (e.g. after navigating from
-      // one document to another) the *same* underlying socket — and with
-      // it, every listener the previous provider registered. forceNew
-      // guarantees each provider owns an independent connection.
-      forceNew: true,
-    });
 
     this.doc.on("update", this.handleLocalDocUpdate);
     this.awareness.on("update", this.handleLocalAwarenessUpdate);
-
-    this.socket.on("connect", this.join);
-    this.socket.on("disconnect", () => this.setStatus("disconnected"));
-    this.socket.on("connect_error", (err) => {
-      this.setStatus("disconnected");
-      this.errorListeners.forEach((l) => l(err.message));
-    });
-    this.socket.on("sync-update", ({ update }: { update: ArrayBuffer }) => {
-      void this.handleIncomingUpdate(new Uint8Array(update));
-    });
-    this.socket.on("awareness-update", ({ update }: { update: ArrayBuffer }) => {
-      awarenessProtocol.applyAwarenessUpdate(this.awareness, new Uint8Array(update), "remote");
-    });
-    this.socket.on("reaction", (event: ReactionEvent) => {
-      this.reactionListeners.forEach((l) => l(event));
-    });
-    this.socket.on("attribution", (event: AttributionEvent) => {
-      this.attributionListeners.forEach((l) => l(event));
-    });
+    void this.bootstrap();
   }
 
-  /** Broadcasts an ephemeral emoji reaction to everyone else in the document (not persisted, not part of the CRDT). */
   sendReaction(emoji: string) {
-    this.socket.emit("reaction", { docId: this.docId, emoji });
+    void this.post({ type: "signal", kind: "reaction", emoji, clientId: this.doc.clientID });
   }
 
   onReaction(listener: Listener<ReactionEvent>) {
@@ -146,9 +97,8 @@ export class SocketIOProvider {
     return () => this.reactionListeners.delete(listener);
   }
 
-  /** Broadcasts "I just typed at this range" for the live attribution heatmap — ephemeral, not part of the CRDT. */
   sendAttribution(index: number, length: number) {
-    this.socket.emit("attribution", { docId: this.docId, index, length });
+    void this.post({ type: "signal", kind: "attribution", index, length, clientId: this.doc.clientID });
   }
 
   onAttribution(listener: Listener<AttributionEvent>) {
@@ -156,100 +106,129 @@ export class SocketIOProvider {
     return () => this.attributionListeners.delete(listener);
   }
 
-  private join = () => {
-    this.setStatus("connecting");
-    this.socket.emit(
-      "join-document",
-      { docId: this.docId, awarenessClientId: this.awareness.clientID },
-      (ack: JoinAck) => {
-        void this.handleJoinAck(ack);
-      }
-    );
-  };
-
-  private async handleJoinAck(ack: JoinAck): Promise<void> {
-    if (!ack.ok) {
-      this.errorListeners.forEach((l) => l(ack.error ?? "Could not join the document"));
-      this.setStatus("disconnected");
-      return;
-    }
-
+  private async bootstrap() {
     try {
-      if (ack.encrypted) {
-        if (!this.encryptionKey) {
-          this.errorListeners.forEach((l) => l("This document needs an access key — open it from the full link"));
-          this.setStatus("disconnected");
-          return;
-        }
-        if (ack.state) {
-          const plain = await decryptBytes(this.encryptionKey, new Uint8Array(ack.state));
-          Y.applyUpdate(this.doc, plain, "server-init");
-        }
-        for (const pending of ack.pendingUpdates ?? []) {
-          const plain = await decryptBytes(this.encryptionKey, new Uint8Array(pending));
-          Y.applyUpdate(this.doc, plain, "server-init");
-        }
-        if (!this.checkpointTimer) {
-          this.checkpointTimer = setInterval(() => void this.pushCheckpoint(), CHECKPOINT_INTERVAL_MS);
-        }
-      } else if (ack.state) {
-        Y.applyUpdate(this.doc, new Uint8Array(ack.state), "server-init");
+      const payload = await this.pull();
+      await this.applySnapshot(payload, true);
+      this.awareness.setLocalStateField("user", this.localUser);
+      this.setStatus("connected");
+      if (!this.hasSynced) {
+        this.hasSynced = true;
+        this.readyListeners.forEach((l) => l({ title: payload.title, ownerId: payload.ownerId }));
       }
+      if (this.encryptionKey && !this.checkpointTimer) {
+        this.checkpointTimer = setInterval(() => void this.pushCheckpoint(), CHECKPOINT_INTERVAL_MS);
+      }
+      this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
     } catch (err) {
-      console.error("[SocketIOProvider] failed to decrypt document state", err);
-      this.errorListeners.forEach((l) => l("Could not decrypt the document — the access key is wrong"));
+      console.error("[sync] join failed", err);
+      this.errorListeners.forEach((l) => l("Could not open the document"));
       this.setStatus("disconnected");
-      return;
-    }
-
-    if (ack.awareness) {
-      awarenessProtocol.applyAwarenessUpdate(this.awareness, new Uint8Array(ack.awareness), "server-init");
-    }
-
-    // Announce who we are. Doing this only *after* joining guarantees the
-    // server has already put our socket in the document's room.
-    this.awareness.setLocalStateField("user", this.localUser);
-
-    this.setStatus("connected");
-    if (!this.hasSynced) {
-      this.hasSynced = true;
-      this.readyListeners.forEach((l) => l({ title: ack.title!, ownerId: ack.ownerId! }));
-    }
-  }
-
-  private async handleIncomingUpdate(update: Uint8Array): Promise<void> {
-    if (this.encryptionKey) {
-      try {
-        const plain = await decryptBytes(this.encryptionKey, update);
-        Y.applyUpdate(this.doc, plain, "remote");
-      } catch (err) {
-        console.error("[SocketIOProvider] failed to decrypt incoming update", err);
+      if (!this.destroyed) {
+        this.pollTimer = setInterval(() => void this.poll(), POLL_MS);
       }
-      return;
     }
-    Y.applyUpdate(this.doc, update, "remote");
   }
 
-  private handleLocalDocUpdate = (update: Uint8Array, origin: unknown) => {
+  private async poll() {
+    if (this.destroyed) return;
+    try {
+      const payload = await this.pull();
+      await this.applySnapshot(payload, false);
+      if (this.status !== "connected") this.setStatus("connected");
+      if (!this.hasSynced) {
+        this.hasSynced = true;
+        this.readyListeners.forEach((l) => l({ title: payload.title, ownerId: payload.ownerId }));
+      }
+    } catch {
+      this.setStatus("disconnected");
+    }
+  }
+
+  private async pull(): Promise<SyncPayload> {
+    const response = await fetch(`${API_URL}/api/sync/${this.docId}?since=${this.signalCursor}`, {
+      headers: authHeaders(this.token),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!response.ok) throw new Error(`sync ${response.status}`);
+    return response.json() as Promise<SyncPayload>;
+  }
+
+  private async post(body: Record<string, unknown>) {
+    const response = await fetch(`${API_URL}/api/sync/${this.docId}`, {
+      method: "POST",
+      headers: authHeaders(this.token),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!response.ok) throw new Error(`sync post ${response.status}`);
+  }
+
+  private async applySnapshot(payload: SyncPayload, initial: boolean) {
+    const origin = initial ? "server-init" : "remote";
+    if (payload.state && (initial || (!this.dirty && payload.state !== this.lastState))) {
+      this.lastState = payload.state;
+      const bytes = base64ToBytes(payload.state);
+      if (this.encryptionKey) {
+        try {
+          Y.applyUpdate(this.doc, await decryptBytes(this.encryptionKey, bytes), origin);
+        } catch (err) {
+          if (initial) throw err;
+        }
+      } else {
+        Y.applyUpdate(this.doc, bytes, origin);
+      }
+    }
+    for (const pending of payload.pending || []) {
+      const bytes = base64ToBytes(pending);
+      if (this.encryptionKey) {
+        Y.applyUpdate(this.doc, await decryptBytes(this.encryptionKey, bytes), origin);
+      }
+    }
+    for (const item of payload.awareness || []) {
+      if (String(item.clientId) === String(this.doc.clientID)) continue;
+      awarenessProtocol.applyAwarenessUpdate(this.awareness, base64ToBytes(item.update), "remote");
+    }
+    for (const signal of payload.signals || []) {
+      this.signalCursor = Math.max(this.signalCursor, signal.id);
+      if (Number(signal.clientId) === this.doc.clientID) continue;
+      if (signal.kind === "reaction" && signal.emoji) {
+        this.reactionListeners.forEach((l) => l({ emoji: signal.emoji!, clientId: Number(signal.clientId) }));
+      }
+      if (signal.kind === "attribution" && typeof signal.index === "number") {
+        this.attributionListeners.forEach((l) =>
+          l({ index: signal.index!, length: signal.length || 0, clientId: Number(signal.clientId) })
+        );
+      }
+    }
+  }
+
+  private handleLocalDocUpdate = (_update: Uint8Array, origin: unknown) => {
     if (origin === "remote" || origin === "server-init") return;
-    if (this.encryptionKey) {
-      void this.sendEncryptedUpdate(update);
-      return;
-    }
-    this.socket.emit("sync-update", { docId: this.docId, update });
+    this.dirty = true;
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => void this.flushLocal(), 1200);
   };
 
-  private async sendEncryptedUpdate(update: Uint8Array): Promise<void> {
-    if (!this.encryptionKey) return;
+  private async flushLocal() {
+    this.flushTimer = null;
     try {
-      const cipher = await encryptBytes(this.encryptionKey, update);
-      this.socket.emit("sync-update", { docId: this.docId, update: cipher });
-      this.opsSinceCheckpoint += 1;
-      if (this.opsSinceCheckpoint >= CHECKPOINT_OP_THRESHOLD) {
-        void this.pushCheckpoint();
+      const state = Y.encodeStateAsUpdate(this.doc);
+      if (this.encryptionKey) {
+        const cipher = await encryptBytes(this.encryptionKey, state);
+        const encoded = bytesToBase64(cipher);
+        await this.post({ type: "checkpoint", state: encoded });
+        this.lastState = encoded;
+      } else {
+        const encoded = bytesToBase64(state);
+        await this.post({ type: "update", update: encoded });
+        this.lastState = encoded;
       }
+      this.dirty = false;
+      this.opsSinceCheckpoint = 0;
     } catch (err) {
-      console.error("[SocketIOProvider] failed to encrypt outgoing update", err);
+      console.error("[sync] flush failed", err);
+      if (!this.destroyed) this.flushTimer = setTimeout(() => void this.flushLocal(), 800);
     }
   }
 
@@ -259,9 +238,9 @@ export class SocketIOProvider {
     try {
       const state = Y.encodeStateAsUpdate(this.doc);
       const cipher = await encryptBytes(this.encryptionKey, state);
-      this.socket.emit("checkpoint", { docId: this.docId, state: cipher });
+      await this.post({ type: "checkpoint", state: bytesToBase64(cipher) });
     } catch (err) {
-      console.error("[SocketIOProvider] failed to push encrypted checkpoint", err);
+      console.error("[sync] checkpoint failed", err);
     }
   }
 
@@ -272,8 +251,16 @@ export class SocketIOProvider {
     if (origin === "remote" || origin === "server-init") return;
     const changedClients = added.concat(updated, removed);
     if (changedClients.length === 0) return;
-    const update = awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients);
-    this.socket.emit("awareness-update", { docId: this.docId, update });
+    if (this.awarenessTimer) clearTimeout(this.awarenessTimer);
+    this.awarenessTimer = setTimeout(() => {
+      this.awarenessTimer = null;
+      const update = awarenessProtocol.encodeAwarenessUpdate(this.awareness, [this.doc.clientID]);
+      void this.post({
+        type: "awareness",
+        clientId: String(this.doc.clientID),
+        update: bytesToBase64(update),
+      }).catch(() => undefined);
+    }, 1500);
   };
 
   private setStatus(status: ConnectionStatus) {
@@ -298,20 +285,15 @@ export class SocketIOProvider {
   }
 
   destroy() {
-    // Best-effort final compaction: fired before we tear the socket down
-    // so it has the best chance of actually reaching the server in the
-    // same tick. Not awaited — a page navigating away can't wait around,
-    // and the periodic timer already covers most cases while the tab was
-    // open.
+    this.destroyed = true;
     if (this.encryptionKey) void this.pushCheckpoint();
     if (this.checkpointTimer) clearInterval(this.checkpointTimer);
-
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    if (this.awarenessTimer) clearTimeout(this.awarenessTimer);
     this.doc.off("update", this.handleLocalDocUpdate);
     this.awareness.off("update", this.handleLocalAwarenessUpdate);
     awarenessProtocol.removeAwarenessStates(this.awareness, [this.doc.clientID], "window-unload");
-    this.socket.emit("leave-document");
-    this.socket.off();
-    this.socket.disconnect();
     void this.persistence.destroy();
     this.doc.destroy();
     this.statusListeners.clear();

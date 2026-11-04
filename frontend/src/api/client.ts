@@ -1,4 +1,9 @@
-export const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8081";
+const configured = import.meta.env.VITE_API_URL;
+// Same-origin API on this deployment. The old Render host no longer answers.
+export const API_URL =
+  !configured || configured === "same" || configured.includes("onrender.com")
+    ? ""
+    : configured.replace(/\/$/, "");
 
 export interface ApiUser {
   id: string;
@@ -62,7 +67,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers.set("Authorization", `Bearer ${authToken}`);
   }
 
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      ...options,
+      headers,
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch {
+    throw new ApiError("Could not reach the server. Try again.", 0);
+  }
   const isJson = response.headers.get("content-type")?.includes("application/json");
   const body = isJson ? await response.json().catch(() => ({})) : undefined;
 
