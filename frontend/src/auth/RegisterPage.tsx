@@ -70,10 +70,10 @@ export default function RegisterPage() {
               type="password"
               autoComplete="new-password"
               required
-              minLength={6}
+              minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="At least 6 characters"
+              placeholder="At least 8 characters"
             />
           </div>
           <button className="btn btn-primary" type="submit" disabled={submitting}>

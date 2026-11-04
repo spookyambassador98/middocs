@@ -1,9 +1,5 @@
-const configured = import.meta.env.VITE_API_URL;
-// Same-origin API on this deployment. The old Render host no longer answers.
-export const API_URL =
-  !configured || configured === "same" || configured.includes("onrender.com")
-    ? ""
-    : configured.replace(/\/$/, "");
+// The API lives on this same site. Ignore VITE_API_URL: an old value pointed at another project.
+export const API_URL = "";
 
 export interface ApiUser {
   id: string;

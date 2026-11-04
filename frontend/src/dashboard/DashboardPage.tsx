@@ -152,9 +152,11 @@ export default function DashboardPage() {
         {error && <div className="form-error" style={{ maxWidth: 480 }}>{error}</div>}
 
         {documents === null ? (
-          <div className="empty-state">
-            <div className="spinner" style={{ margin: "0 auto" }} />
-          </div>
+          error ? null : (
+            <div className="empty-state">
+              <div className="spinner" style={{ margin: "0 auto" }} />
+            </div>
+          )
         ) : documents.length === 0 ? (
           <div className="empty-state">
             <div className="doc-icon" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
